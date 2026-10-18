@@ -33,11 +33,7 @@ struct SpikeDelegate {
 }
 
 impl WebViewDelegate for SpikeDelegate {
-    fn notify_accessibility_tree_update(
-        &self,
-        _webview: WebView,
-        update: accesskit::TreeUpdate,
-    ) {
+    fn notify_accessibility_tree_update(&self, _webview: WebView, update: accesskit::TreeUpdate) {
         self.tree_updates.borrow_mut().push(update);
     }
 }
@@ -119,8 +115,7 @@ fn main() {
         tree_json.len()
     );
     // Print the root node's role as the human-readable proof.
-    let v: serde_json::Value =
-        serde_json::from_str(&tree_json).unwrap_or(serde_json::Value::Null);
+    let v: serde_json::Value = serde_json::from_str(&tree_json).unwrap_or(serde_json::Value::Null);
     println!(
         "P0 [a11y]: tree root sample: {}",
         v.get("tree")
@@ -133,7 +128,11 @@ fn main() {
     println!("P0 [js-eval]: evaluating...");
     let (jtx, jrx) = mpsc::channel();
     webview.evaluate_javascript("document.title", move |result| {
-        let _ = jtx.send(result.map(|v| format!("{v:?}")).map_err(|e| format!("{e:?}")));
+        let _ = jtx.send(
+            result
+                .map(|v| format!("{v:?}"))
+                .map_err(|e| format!("{e:?}")),
+        );
     });
     let title = {
         let start = Instant::now();
@@ -158,7 +157,6 @@ fn main() {
         Err(e) => fail("js-eval", e),
     }
 
-
     // --- 4. screenshot -----------------------------------------------------
     println!("P0 [screenshot]: requesting...");
     let (tx, rx) = mpsc::channel();
@@ -169,7 +167,10 @@ fn main() {
         let start = Instant::now();
         loop {
             if start.elapsed() > Duration::from_secs(170) {
-                fail("screenshot", "timed out waiting for screenshot callback".into());
+                fail(
+                    "screenshot",
+                    "timed out waiting for screenshot callback".into(),
+                );
             }
             match rx.try_recv() {
                 Ok(Ok(rgba)) => {
@@ -192,7 +193,10 @@ fn main() {
     };
     std::fs::write("p0-screenshot.png", &png)
         .unwrap_or_else(|e| fail("screenshot", format!("write png: {e}")));
-    println!("P0 [screenshot]: PASS — wrote p0-screenshot.png ({} bytes)", png.len());
+    println!(
+        "P0 [screenshot]: PASS — wrote p0-screenshot.png ({} bytes)",
+        png.len()
+    );
 
     println!("P0 GATE: PASS");
 }

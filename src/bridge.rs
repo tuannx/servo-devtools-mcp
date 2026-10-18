@@ -40,20 +40,11 @@ struct McpWebViewDelegate {
 }
 
 impl WebViewDelegate for McpWebViewDelegate {
-    fn notify_accessibility_tree_update(
-        &self,
-        _webview: WebView,
-        update: accesskit::TreeUpdate,
-    ) {
+    fn notify_accessibility_tree_update(&self, _webview: WebView, update: accesskit::TreeUpdate) {
         self.tree_updates.borrow_mut().push(update);
     }
 
-    fn show_console_message(
-        &self,
-        _webview: WebView,
-        level: ConsoleLogLevel,
-        message: String,
-    ) {
+    fn show_console_message(&self, _webview: WebView, level: ConsoleLogLevel, message: String) {
         self.console
             .borrow_mut()
             .push((format!("{level:?}"), message));
@@ -87,9 +78,8 @@ struct ServoEngine {
 impl ServoEngine {
     fn new(rx: Receiver<BridgeCommand>) -> anyhow::Result<Self> {
         let rendering_context = Rc::new(
-            SoftwareRenderingContext::new(VIEWPORT).map_err(|e| {
-                anyhow::anyhow!("SoftwareRenderingContext::new failed: {e:?}")
-            })?,
+            SoftwareRenderingContext::new(VIEWPORT)
+                .map_err(|e| anyhow::anyhow!("SoftwareRenderingContext::new failed: {e:?}"))?,
         );
         rendering_context
             .make_current()
@@ -101,8 +91,7 @@ impl ServoEngine {
         // Accessibility tree updates only flow when this pref is on; without
         // it `set_accessibility_active()` is a no-op (see webview.rs).
         preferences.accessibility_enabled = true;
-        if let Ok(proxy) = std::env::var("https_proxy").or_else(|_| std::env::var("HTTPS_PROXY"))
-        {
+        if let Ok(proxy) = std::env::var("https_proxy").or_else(|_| std::env::var("HTTPS_PROXY")) {
             preferences.network_https_proxy_uri = proxy;
         }
         if let Ok(proxy) = std::env::var("http_proxy").or_else(|_| std::env::var("HTTP_PROXY")) {
@@ -248,9 +237,7 @@ impl ServoEngine {
                 let result = serde_json::to_string(
                     &messages
                         .iter()
-                        .map(|(level, text)| {
-                            serde_json::json!({"level": level, "message": text})
-                        })
+                        .map(|(level, text)| serde_json::json!({"level": level, "message": text}))
                         .collect::<Vec<_>>(),
                 )
                 .map_err(|e| format!("console serialize failed: {e}"));
@@ -306,7 +293,8 @@ impl ServoBridge {
 
     /// Load `url` and wait for `LoadStatus::Complete`. Returns the final URL.
     pub async fn navigate(&self, url: String) -> Result<String, String> {
-        self.call(|reply| BridgeCommand::Navigate { url, reply }).await
+        self.call(|reply| BridgeCommand::Navigate { url, reply })
+            .await
     }
 
     /// Capture the current viewport as PNG bytes.
@@ -316,7 +304,8 @@ impl ServoBridge {
 
     /// Enable accessibility and return the latest AccessKit `TreeUpdate` as JSON.
     pub async fn a11y_snapshot(&self) -> Result<String, String> {
-        self.call(|reply| BridgeCommand::A11ySnapshot { reply }).await
+        self.call(|reply| BridgeCommand::A11ySnapshot { reply })
+            .await
     }
 
     /// Return console messages captured so far as a JSON array.
