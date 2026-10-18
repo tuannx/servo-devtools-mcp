@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # NOTE: `cargo check` (not `cargo build`) is deliberate here. A full build
+    # of the pinned Servo engine takes 1–3h and ~15 GB of disk. `cargo check`
+    # still type-checks our crate *and* the servo dependency API usage, which is
+    # what this gate is for. The runtime P0 gate (`cargo run --example p0_spike`)
+    # is run manually on a build machine, not in CI.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check (all targets)
+        run: cargo check --all-targets --locked
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check

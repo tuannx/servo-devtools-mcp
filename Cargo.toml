@@ -1,0 +1,56 @@
+[package]
+name = "servo-devtools-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "MCP server exposing Servo browser-engine control to AI agents — chrome-devtools-mcp for Servo"
+license = "MIT"
+repository = "https://github.com/tuannx/servo-devtools-mcp"
+rust-version = "1.97"
+
+# ---------------------------------------------------------------------------
+# Pinned Servo revision
+# ---------------------------------------------------------------------------
+# The `servo` crate is not published on crates.io; a git dependency pinned to
+# a verified commit is the only route.
+#
+# Pinned: 23564ef62e2d898dee75d161bf62cb4d5cb89daf
+#         (servo/servo main, 2026-10-18T16:11:14Z — verified 2026-10-18)
+#
+# API surface used here was verified by reading that commit's source:
+#   components/servo/lib.rs            (re-exports: Servo, ServoBuilder,
+#                                       WebView, WebViewBuilder, WebViewDelegate,
+#                                       SoftwareRenderingContext, accesskit, RgbaImage)
+#   components/servo/webview.rs        (WebView::{load, reload, go_back,
+#                                       go_forward, resize, evaluate_javascript,
+#                                       take_screenshot, set_accessibility_active,
+#                                       url, page_title, load_status,
+#                                       notify_input_event, notify_scroll_event})
+#   components/servo/webview_delegate.rs (WebViewDelegate::{notify_accessibility_tree_update,
+#                                       show_console_message} — both public, default no-op)
+#   components/servo/servo.rs          (ServoBuilder::default() carries a
+#                                       DefaultEventLoopWaker — no custom waker needed)
+#   components/servo/tests/{accessibility.rs, common/mod.rs}
+#                                       (headless spike pattern: SoftwareRenderingContext
+#                                        + ServoBuilder + WebViewBuilder::new(&servo, rc))
+#
+# When bumping the pin, re-check those files — Servo's WebView API churns.
+
+[dependencies]
+servo = { git = "https://github.com/servo/servo", rev = "23564ef62e2d898dee75d161bf62cb4d5cb89daf", package = "servo" }
+rmcp = { version = "3.5.1", features = ["server"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+dpi = "0.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+
+[dev-dependencies]
+
+[[example]]
+name = "p0_spike"
+path = "examples/p0_spike.rs"
