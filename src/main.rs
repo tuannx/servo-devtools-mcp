@@ -21,6 +21,53 @@ struct NavigateParams {
     url: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ClickParams {
+    /// X coordinate in CSS pixels.
+    x: f32,
+    /// Y coordinate in CSS pixels.
+    y: f32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct TypeTextParams {
+    /// Text to type into the focused element.
+    text: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct KeyPressParams {
+    /// Key name: Enter, Tab, Escape, Backspace, Delete, ArrowLeft/Right/Up/Down,
+    /// Home, End, PageUp, PageDown, F1-F12, or a single character.
+    key: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ScrollParams {
+    /// X coordinate in CSS pixels.
+    x: f32,
+    /// Y coordinate in CSS pixels.
+    y: f32,
+    /// Horizontal scroll delta in CSS pixels.
+    dx: f32,
+    /// Vertical scroll delta in CSS pixels.
+    dy: f32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct EvaluateJsParams {
+    /// JavaScript to evaluate in the page.
+    script: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ResizeViewportParams {
+    /// Viewport width in pixels.
+    width: u32,
+    /// Viewport height in pixels.
+    height: u32,
+}
+
 #[derive(Clone)]
 struct ServoDevtools {
     bridge: Arc<Mutex<Option<ServoBridge>>>,
@@ -110,6 +157,156 @@ impl ServoDevtools {
         let engine = self.engine().await?;
         match engine.console_messages().await {
             Ok(json) => Self::ok_text(json),
+            Err(e) => Err(Self::err_text(e)),
+        }
+    }
+
+    #[tool(
+        name = "reload",
+        description = "Reload the current page and wait for it to finish loading. Returns the final URL."
+    )]
+    async fn reload(&self) -> Result<CallToolResult, McpError> {
+        let engine = self.engine().await?;
+        match engine.reload().await {
+            Ok(url) => Self::ok_text(format!("reloaded: {url}")),
+            Err(e) => Err(Self::err_text(e)),
+        }
+    }
+
+    #[tool(
+        name = "go_back",
+        description = "Go back one step in the page history. Returns the final URL."
+    )]
+    async fn go_back(&self) -> Result<CallToolResult, McpError> {
+        let engine = self.engine().await?;
+        match engine.go_back().await {
+            Ok(url) => Self::ok_text(format!("went back to: {url}")),
+            Err(e) => Err(Self::err_text(e)),
+        }
+    }
+
+    #[tool(
+        name = "go_forward",
+        description = "Go forward one step in the page history. Returns the final URL."
+    )]
+    async fn go_forward(&self) -> Result<CallToolResult, McpError> {
+        let engine = self.engine().await?;
+        match engine.go_forward().await {
+            Ok(url) => Self::ok_text(format!("went forward to: {url}")),
+            Err(e) => Err(Self::err_text(e)),
+        }
+    }
+
+    #[tool(
+        name = "get_state",
+        description = "Return the current page state as JSON: {url, title, load_status}."
+    )]
+    async fn get_state(&self) -> Result<CallToolResult, McpError> {
+        let engine = self.engine().await?;
+        match engine.get_state().await {
+            Ok(json) => Self::ok_text(json),
+            Err(e) => Err(Self::err_text(e)),
+        }
+    }
+
+    #[tool(
+        name = "click",
+        description = "Click at CSS-pixel coordinates (x, y): mouse move, button down, button up."
+    )]
+    async fn click(&self, params: Parameters<ClickParams>) -> Result<CallToolResult, McpError> {
+        let engine = self.engine().await?;
+        match engine.click(params.0.x, params.0.y).await {
+            Ok(msg) => Self::ok_text(msg),
+            Err(e) => Err(Self::err_text(e)),
+        }
+    }
+
+    #[tool(
+        name = "type_text",
+        description = "Type text into the focused element, character by character."
+    )]
+    async fn type_text(
+        &self,
+        params: Parameters<TypeTextParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.engine().await?;
+        match engine.type_text(params.0.text).await {
+            Ok(msg) => Self::ok_text(msg),
+            Err(e) => Err(Self::err_text(e)),
+        }
+    }
+
+    #[tool(
+        name = "key_press",
+        description = "Press a key: Enter, Tab, Escape, Backspace, Delete, ArrowLeft/Right/Up/Down, Home, End, PageUp, PageDown, F1-F12, or a single character."
+    )]
+    async fn key_press(
+        &self,
+        params: Parameters<KeyPressParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.engine().await?;
+        match engine.key_press(params.0.key).await {
+            Ok(msg) => Self::ok_text(msg),
+            Err(e) => Err(Self::err_text(e)),
+        }
+    }
+
+    #[tool(
+        name = "scroll",
+        description = "Scroll by (dx, dy) CSS pixels at point (x, y)."
+    )]
+    async fn scroll(&self, params: Parameters<ScrollParams>) -> Result<CallToolResult, McpError> {
+        let engine = self.engine().await?;
+        match engine
+            .scroll(params.0.x, params.0.y, params.0.dx, params.0.dy)
+            .await
+        {
+            Ok(msg) => Self::ok_text(msg),
+            Err(e) => Err(Self::err_text(e)),
+        }
+    }
+
+    #[tool(
+        name = "dom_snapshot",
+        description = "Return the page's serialized DOM (document.documentElement.outerHTML)."
+    )]
+    async fn dom_snapshot(&self) -> Result<CallToolResult, McpError> {
+        let engine = self.engine().await?;
+        match engine.dom_snapshot().await {
+            Ok(html) => Self::ok_text(html),
+            Err(e) => Err(Self::err_text(e)),
+        }
+    }
+
+    #[tool(
+        name = "evaluate_js",
+        description = "Evaluate JavaScript in the page and return the result as JSON."
+    )]
+    async fn evaluate_js(
+        &self,
+        params: Parameters<EvaluateJsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.engine().await?;
+        match engine.evaluate_js(params.0.script).await {
+            Ok(json) => Self::ok_text(json),
+            Err(e) => Err(Self::err_text(e)),
+        }
+    }
+
+    #[tool(
+        name = "resize_viewport",
+        description = "Resize the viewport to width x height pixels."
+    )]
+    async fn resize_viewport(
+        &self,
+        params: Parameters<ResizeViewportParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.engine().await?;
+        match engine
+            .resize_viewport(params.0.width, params.0.height)
+            .await
+        {
+            Ok(msg) => Self::ok_text(msg),
             Err(e) => Err(Self::err_text(e)),
         }
     }

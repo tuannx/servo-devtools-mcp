@@ -5339,6 +5339,7 @@ dependencies = [
  "base64 0.22.1",
  "dpi",
  "env_logger",
+ "euclid",
  "image",
  "log",
  "rmcp",
