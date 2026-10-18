@@ -16,17 +16,42 @@ not affiliated with it. It depends on Servo only as a library (git dependency,
 see "Pinned Servo revision" below). No code is copied from Servo; the crate's
 own files are MIT.
 
-## Status: P0 (spike)
+## Status: P1 (MVP)
 
 | Milestone | State |
 |---|---|
 | P0 — prove a11y tree + JS eval + navigation from an independent crate | ✅ **PASS** (verified 2026-10-18, see evidence below) |
-| P0 — screenshot tool | ❌ **BLOCKED** — `take_screenshot` callback never fires in this VM (see "Known issue") |
-| P1 — 12 tools MVP | planned |
+| P1 — 15 tools MVP | ✅ **PASS** (verified 2026-10-18, see evidence below) |
 | P2 — debugging parity subset | planned |
 | P3 — crates.io publish + dev.to write-up | planned |
 
 Full plan: [`servo-devtools-mcp-plan-2026-10-17.md`](../) (in the author's notes repo).
+
+### P1 — evidence (2026-10-18, this VM)
+
+End-to-end MCP stdio smoke test (`/tmp/p1_smoke.py`), 21/21 checks green:
+
+- **screenshot — FIXED.** Root cause of the P0 stall: the engine loop never
+  called `WebView::paint()`, so `Painter::render()` never ran and the
+  screenshot state machine (`ScreenshotTaker`) never advanced past readiness —
+  exactly like servoshell, the embedder must drive repaints. Fix: the servo
+  thread now paints at a 100 ms cadence, and the screenshot handler paints
+  every poll iteration. Verified: real 1280×800 PNG with page content
+  (background #336699, white text — 853 distinct colors, not a blank frame).
+- **console_messages — verified end-to-end.** Page `console.log`/`warn`/`error`
+  all captured via the public `WebViewDelegate::show_console_message` callback
+  (no Servo patch needed — the earlier plan draft was wrong on this).
+- **Form interaction loop works.** Click into an `<input>`, `type_text "Tony"`,
+  click a `<button>` → `evaluate_js` confirms the page's `onclick` ran
+  (`"clicked:Tony"`). Hit-testing works because the run loop keeps the
+  compositor fresh.
+- **Navigation suite:** `navigate` (data: + https via egress proxy —
+  example.com → "Example Domain"), `reload`, `go_back`, `go_forward`,
+  `get_state` (`{url, title, load_status}`), `resize_viewport` 800×600.
+- **Observation suite:** `dom_snapshot` (outerHTML), `evaluate_js` (JSON
+  results, incl. `getBoundingClientRect`), `scroll`, `key_press` (Enter;
+  unknown key names return a clean error).
+- `cargo check --all-targets --locked` + `cargo fmt --check`: PASS.
 
 ### P0 gate — evidence (2026-10-18, this VM)
 
@@ -38,28 +63,34 @@ Full plan: [`servo-devtools-mcp-plan-2026-10-17.md`](../) (in the author's notes
 - `P0 [js-eval]: PASS — document.title = String("")` — `evaluate_javascript` works.
 - `navigate` via MCP: `loaded: data:text/html,...` — first navigation goes through
   `WebViewBuilder::url()` (avoids a `NewWebView`/`LoadUrl` race on fresh webviews).
-- `console_messages` plumbing works (returns `[]`); page `console.log` capture
-  not yet verified end-to-end.
 - `cargo check --all-targets --locked`: PASS.
 
-### Known issue: screenshot
+### Known issues
 
-`WebView::take_screenshot` never invokes its callback here. The pipeline reports
-`Ready to take screenshot at epoch=Epoch(3)`, so the 3-phase readiness gate
-resolves — the request stalls in the painter afterwards (likely
-`has_pending_frames()` never clearing or `read_to_image` on the software GL
-context in this headless VM). Frames *are* produced (`notify_new_frame_ready`
-fired 247×), so compositing works; only the screenshot readback path is stuck.
-Needs investigation on a machine with real GL or deeper painter debugging.
+- None currently blocking. Screenshot and console capture — the two P0
+  unknowns — are both resolved (see P1 evidence). Remaining P1 caveats:
+  `type_text` sends per-character key events (no IME); `scroll` is a raw wheel
+  delta with no smooth-scroll animation; `a11y_snapshot` drains the update
+  buffer each call (by design — next call sees fresh updates).
 
-## MCP tools (P0)
+## MCP tools (P1 — 15 tools)
 
 | Tool | Description |
 |---|---|
 | `navigate` | Load a URL, wait for `LoadStatus::Complete`, return the final URL |
+| `reload` | Reload the page, wait for load, return the final URL |
+| `go_back` / `go_forward` | History traversal, return the final URL |
+| `get_state` | `{url, title, load_status}` as JSON |
+| `click` | Click at CSS-pixel (x, y): mouse move + button down/up |
+| `type_text` | Type text into the focused element, character by character |
+| `key_press` | Enter, Tab, Escape, Backspace, Delete, arrows, Home/End, PageUp/Down, F1–F12, or a single char |
+| `scroll` | Scroll by (dx, dy) CSS pixels at point (x, y) |
 | `screenshot` | Capture the viewport as PNG (returned base64) |
 | `a11y_snapshot` | Enable accessibility, return the latest AccessKit `TreeUpdate` as JSON — the agent's DOM |
+| `dom_snapshot` | `document.documentElement.outerHTML` |
+| `evaluate_js` | Evaluate JavaScript, return the result as JSON |
 | `console_messages` | Console messages logged by page content so far, as JSON |
+| `resize_viewport` | Resize the viewport to width × height pixels |
 
 ### Client config (Claude Code)
 
