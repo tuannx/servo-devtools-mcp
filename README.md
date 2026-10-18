@@ -20,29 +20,37 @@ own files are MIT.
 
 | Milestone | State |
 |---|---|
-| P0 — prove a11y tree + screenshot + JS eval from an independent crate | 🚧 code written, API surface verified against pinned Servo source; **runtime gate not yet passed on this machine** (see below) |
+| P0 — prove a11y tree + JS eval + navigation from an independent crate | ✅ **PASS** (verified 2026-10-18, see evidence below) |
+| P0 — screenshot tool | ❌ **BLOCKED** — `take_screenshot` callback never fires in this VM (see "Known issue") |
 | P1 — 12 tools MVP | planned |
 | P2 — debugging parity subset | planned |
 | P3 — crates.io publish + dev.to write-up | planned |
 
 Full plan: [`servo-devtools-mcp-plan-2026-10-17.md`](../) (in the author's notes repo).
 
-### P0 gate
+### P0 gate — evidence (2026-10-18, this VM)
 
-Run the spike binary:
+`cargo run --example p0_spike` and live MCP `tools/call` smoke tests:
 
-```sh
-cargo run --example p0_spike
-```
+- `P0 [a11y]: PASS — received 3 tree update(s)` — delegate receives AccessKit
+  `TreeUpdate`s; `a11y_snapshot` returns a real tree (`heading`/"Hello from Servo",
+  `paragraph`, `textRun`, `rootWebArea` with bounds).
+- `P0 [js-eval]: PASS — document.title = String("")` — `evaluate_javascript` works.
+- `navigate` via MCP: `loaded: data:text/html,...` — first navigation goes through
+  `WebViewBuilder::url()` (avoids a `NewWebView`/`LoadUrl` race on fresh webviews).
+- `console_messages` plumbing works (returns `[]`); page `console.log` capture
+  not yet verified end-to-end.
+- `cargo check --all-targets --locked`: PASS.
 
-Pass = prints the accessibility tree root role + node count, writes
-`p0-screenshot.png`, prints `document.title`, exits 0. Fail = names the step
-and exits non-zero.
+### Known issue: screenshot
 
-The spike mirrors Servo's own headless test harness
-(`components/servo/tests/common/mod.rs` @ pinned rev): `SoftwareRenderingContext`
-+ `ServoBuilder::default()` + `WebViewBuilder::new(&servo, rc)`, pumping
-`spin_event_loop()`.
+`WebView::take_screenshot` never invokes its callback here. The pipeline reports
+`Ready to take screenshot at epoch=Epoch(3)`, so the 3-phase readiness gate
+resolves — the request stalls in the painter afterwards (likely
+`has_pending_frames()` never clearing or `read_to_image` on the software GL
+context in this headless VM). Frames *are* produced (`notify_new_frame_ready`
+fired 247×), so compositing works; only the screenshot readback path is stuck.
+Needs investigation on a machine with real GL or deeper painter debugging.
 
 ## MCP tools (P0)
 
@@ -74,6 +82,14 @@ and the system libraries Servo needs (see [Servo's build docs](https://servo.org
 ```sh
 cargo build --release
 ```
+
+**Environment notes** (from the 2026-10-18 bring-up on a headless Linux VM):
+- `SoftwareRenderingContext` needs `libEGL` (Mesa): `apt install libegl1 libegl-mesa0`,
+  plus a valid `XDG_RUNTIME_DIR`.
+- Sandboxed networks need the egress proxy in `Preferences`
+  (`network_*_proxy_uri`), like Servo's headless test does.
+- Accessibility needs `preferences.accessibility_enabled = true`, otherwise
+  `set_accessibility_active()` is a silent no-op.
 
 ### Pinned Servo revision
 

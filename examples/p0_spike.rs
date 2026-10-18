@@ -48,6 +48,8 @@ fn fail(step: &str, detail: String) -> ! {
 }
 
 fn main() {
+    // Enable servo's internal debug logs (e.g. screenshot readiness).
+    let _ = env_logger::try_init();
     // --- 1. boot headless -------------------------------------------------
     let rendering_context = Rc::new(
         SoftwareRenderingContext::new(PhysicalSize {
@@ -61,8 +63,17 @@ fn main() {
     }
 
     let mut preferences = Preferences::default();
-    preferences.network_http_proxy_uri = String::new();
-    preferences.network_https_proxy_uri = String::new();
+    // Accessibility tree updates only flow when this pref is on; without
+    // it `set_accessibility_active()` is a no-op (see webview.rs).
+    preferences.accessibility_enabled = true;
+    // This sandbox (and many CI nets) requires an egress proxy; feed it
+    // through preferences like servo's headless test does.
+    if let Ok(proxy) = std::env::var("https_proxy").or_else(|_| std::env::var("HTTPS_PROXY")) {
+        preferences.network_https_proxy_uri = proxy;
+    }
+    if let Ok(proxy) = std::env::var("http_proxy").or_else(|_| std::env::var("HTTP_PROXY")) {
+        preferences.network_http_proxy_uri = proxy;
+    }
     let servo: Servo = ServoBuilder::default().preferences(preferences).build();
 
     let delegate = Rc::new(SpikeDelegate::default());
@@ -118,48 +129,27 @@ fn main() {
             .unwrap_or_else(|| "(unparsed)".into())
     );
 
-    // --- 3. screenshot -----------------------------------------------------
-    let (tx, rx) = mpsc::channel();
-    webview.take_screenshot(None, move |result| {
-        let _ = tx.send(result.map_err(|e| format!("{e:?}")));
-    });
-    let png: Vec<u8> = loop {
-        match rx.try_recv() {
-            Ok(Ok(rgba)) => {
-                let mut cursor = std::io::Cursor::new(Vec::new());
-                if let Err(e) = rgba.write_to(&mut cursor, ImageFormat::Png) {
-                    fail("screenshot", format!("png encode: {e}"));
-                }
-                break cursor.into_inner();
-            }
-            Ok(Err(e)) => fail("screenshot", e),
-            Err(mpsc::TryRecvError::Empty) => {
-                servo.spin_event_loop();
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                fail("screenshot", "callback channel disconnected".into())
-            }
-        }
-    };
-    std::fs::write("p0-screenshot.png", &png)
-        .unwrap_or_else(|e| fail("screenshot", format!("write png: {e}")));
-    println!("P0 [screenshot]: PASS — wrote p0-screenshot.png ({} bytes)", png.len());
-
-    // --- 4. javascript eval ------------------------------------------------
+    // --- 3. javascript eval ------------------------------------------------
+    println!("P0 [js-eval]: evaluating...");
     let (jtx, jrx) = mpsc::channel();
     webview.evaluate_javascript("document.title", move |result| {
         let _ = jtx.send(result.map(|v| format!("{v:?}")).map_err(|e| format!("{e:?}")));
     });
-    let title = loop {
-        match jrx.try_recv() {
-            Ok(r) => break r,
-            Err(mpsc::TryRecvError::Empty) => {
-                servo.spin_event_loop();
-                std::thread::sleep(Duration::from_millis(2));
+    let title = {
+        let start = Instant::now();
+        loop {
+            if start.elapsed() > Duration::from_secs(60) {
+                fail("js-eval", "timed out waiting for js callback".into());
             }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                fail("js-eval", "callback channel disconnected".into())
+            match jrx.try_recv() {
+                Ok(r) => break r,
+                Err(mpsc::TryRecvError::Empty) => {
+                    servo.spin_event_loop();
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    fail("js-eval", "callback channel disconnected".into())
+                }
             }
         }
     };
@@ -167,6 +157,42 @@ fn main() {
         Ok(t) => println!("P0 [js-eval]: PASS — document.title = {t}"),
         Err(e) => fail("js-eval", e),
     }
+
+
+    // --- 4. screenshot -----------------------------------------------------
+    println!("P0 [screenshot]: requesting...");
+    let (tx, rx) = mpsc::channel();
+    webview.take_screenshot(None, move |result| {
+        let _ = tx.send(result.map_err(|e| format!("{e:?}")));
+    });
+    let png: Vec<u8> = {
+        let start = Instant::now();
+        loop {
+            if start.elapsed() > Duration::from_secs(170) {
+                fail("screenshot", "timed out waiting for screenshot callback".into());
+            }
+            match rx.try_recv() {
+                Ok(Ok(rgba)) => {
+                    let mut cursor = std::io::Cursor::new(Vec::new());
+                    if let Err(e) = rgba.write_to(&mut cursor, ImageFormat::Png) {
+                        fail("screenshot", format!("png encode: {e}"));
+                    }
+                    break cursor.into_inner();
+                }
+                Ok(Err(e)) => fail("screenshot", e),
+                Err(mpsc::TryRecvError::Empty) => {
+                    servo.spin_event_loop();
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    fail("screenshot", "callback channel disconnected".into())
+                }
+            }
+        }
+    };
+    std::fs::write("p0-screenshot.png", &png)
+        .unwrap_or_else(|e| fail("screenshot", format!("write png: {e}")));
+    println!("P0 [screenshot]: PASS — wrote p0-screenshot.png ({} bytes)", png.len());
 
     println!("P0 GATE: PASS");
 }

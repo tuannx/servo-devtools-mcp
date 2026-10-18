@@ -78,7 +78,8 @@ enum BridgeCommand {
 
 struct ServoEngine {
     servo: Servo,
-    webview: WebView,
+    rendering_context: Rc<SoftwareRenderingContext>,
+    webview: Option<WebView>,
     delegate: Rc<McpWebViewDelegate>,
     rx: Receiver<BridgeCommand>,
 }
@@ -94,24 +95,45 @@ impl ServoEngine {
             .make_current()
             .map_err(|e| anyhow::anyhow!("rendering context make_current failed: {e:?}"))?;
 
-        // Proxy env vars break localhost-only test traffic; the servo test
-        // harness clears them, so do we.
+        // Sandboxed/CI networks often require an egress proxy; feed it
+        // through preferences like servo's headless test does.
         let mut preferences = Preferences::default();
-        preferences.network_http_proxy_uri = String::new();
-        preferences.network_https_proxy_uri = String::new();
+        // Accessibility tree updates only flow when this pref is on; without
+        // it `set_accessibility_active()` is a no-op (see webview.rs).
+        preferences.accessibility_enabled = true;
+        if let Ok(proxy) = std::env::var("https_proxy").or_else(|_| std::env::var("HTTPS_PROXY"))
+        {
+            preferences.network_https_proxy_uri = proxy;
+        }
+        if let Ok(proxy) = std::env::var("http_proxy").or_else(|_| std::env::var("HTTP_PROXY")) {
+            preferences.network_http_proxy_uri = proxy;
+        }
 
         let servo = ServoBuilder::default().preferences(preferences).build();
         let delegate = Rc::new(McpWebViewDelegate::default());
-        let webview = WebViewBuilder::new(&servo, rendering_context)
-            .delegate(delegate.clone())
-            .build();
 
         Ok(Self {
             servo,
-            webview,
+            rendering_context,
+            webview: None,
             delegate,
             rx,
         })
+    }
+
+    /// Get the live webview, creating it on first navigation. The first
+    /// navigation goes through `WebViewBuilder::url()` because `WebView::load()`
+    /// races with the async `NewWebView` constellation message on a fresh
+    /// webview (the `LoadUrl` is dropped if it arrives first).
+    fn ensure_webview(&mut self, first_url: Url) -> &WebView {
+        if self.webview.is_none() {
+            let webview = WebViewBuilder::new(&self.servo, self.rendering_context.clone())
+                .delegate(self.delegate.clone())
+                .url(first_url)
+                .build();
+            self.webview = Some(webview);
+        }
+        self.webview.as_ref().unwrap()
     }
 
     fn pump_until(&self, mut done: impl FnMut() -> bool, timeout: Duration) -> bool {
@@ -126,29 +148,41 @@ impl ServoEngine {
         true
     }
 
-    fn handle(&self, cmd: BridgeCommand) {
+    fn handle(&mut self, cmd: BridgeCommand) {
         match cmd {
             BridgeCommand::Navigate { url, reply } => {
                 let result = (|| -> Result<String, String> {
                     let parsed = Url::parse(&url).map_err(|e| format!("bad url: {e}"))?;
-                    self.webview.load(parsed);
+                    if self.webview.is_none() {
+                        // First navigation: go through the builder to avoid the
+                        // NewWebView/LoadUrl race on a fresh webview.
+                        self.ensure_webview(parsed.clone());
+                    } else {
+                        self.webview.as_ref().unwrap().load(parsed.clone());
+                    }
+                    let webview = self.webview.as_ref().unwrap();
+                    // Wait for the URL to actually change (covers redirect
+                    // chains), then for the load to complete.
+                    if !self.pump_until(|| webview.url() == Some(parsed.clone()), TOOL_TIMEOUT) {
+                        return Err("navigation timed out waiting for URL change".into());
+                    }
                     if !self.pump_until(
-                        || self.webview.load_status() == LoadStatus::Complete,
+                        || webview.load_status() == LoadStatus::Complete,
                         TOOL_TIMEOUT,
                     ) {
                         return Err("navigation timed out waiting for LoadStatus::Complete".into());
                     }
-                    Ok(self
-                        .webview
-                        .url()
-                        .map(|u| u.to_string())
-                        .unwrap_or_default())
+                    Ok(webview.url().map(|u| u.to_string()).unwrap_or_default())
                 })();
                 let _ = reply.send(result);
             }
             BridgeCommand::Screenshot { reply } => {
+                let Some(webview) = self.webview.as_ref() else {
+                    let _ = reply.send(Err("no page loaded yet; call navigate first".into()));
+                    return;
+                };
                 let (tx, rx) = mpsc::channel();
-                self.webview.take_screenshot(None, move |result| {
+                webview.take_screenshot(None, move |result| {
                     let _ = tx.send(result.map_err(|e| format!("screenshot failed: {e:?}")));
                 });
                 let mut outcome: Result<Vec<u8>, String> =
@@ -178,20 +212,32 @@ impl ServoEngine {
                 let _ = reply.send(outcome);
             }
             BridgeCommand::A11ySnapshot { reply } => {
-                self.webview.set_accessibility_active(true);
-                let got_update = self.pump_until(
-                    || !self.delegate.tree_updates.borrow().is_empty(),
-                    TOOL_TIMEOUT,
+                let Some(webview) = self.webview.as_ref() else {
+                    let _ = reply.send(Err("no page loaded yet; call navigate first".into()));
+                    return;
+                };
+                webview.set_accessibility_active(true);
+                // Servo sends the tree as a sequence of incremental updates
+                // (its own test waits for 3). Collect a few before returning.
+                self.pump_until(
+                    || self.delegate.tree_updates.borrow().len() >= 3,
+                    Duration::from_secs(10),
                 );
-                let result = if got_update {
-                    let updates = self.delegate.tree_updates.borrow();
-                    match updates.last() {
-                        Some(update) => serde_json::to_string(update)
-                            .map_err(|e| format!("tree serialize failed: {e}")),
-                        None => Err("no tree update received".into()),
-                    }
-                } else {
+                // Drain whatever arrived so the next call sees fresh updates.
+                let updates: Vec<String> = self
+                    .delegate
+                    .tree_updates
+                    .borrow_mut()
+                    .drain(..)
+                    .map(|u| {
+                        serde_json::to_string(&u)
+                            .unwrap_or_else(|e| format!("{{\"serialize_error\":\"{e}\"}}"))
+                    })
+                    .collect();
+                let result = if updates.is_empty() {
                     Err("timed out waiting for accessibility tree update".into())
+                } else {
+                    Ok(format!("[{}]", updates.join(",")))
                 };
                 let _ = reply.send(result);
             }
@@ -213,7 +259,7 @@ impl ServoEngine {
         }
     }
 
-    fn run(self) {
+    fn run(mut self) {
         loop {
             while let Ok(cmd) = self.rx.try_recv() {
                 self.handle(cmd);
