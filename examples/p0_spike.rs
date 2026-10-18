@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use dpi::PhysicalSize;
 use image::ImageFormat;
 use servo::{
-    accesskit, LoadStatus, Preferences, Servo, ServoBuilder, SoftwareRenderingContext,
-    WebView, WebViewBuilder, WebViewDelegate,
+    accesskit, LoadStatus, Preferences, RenderingContext, Servo, ServoBuilder,
+    SoftwareRenderingContext, WebView, WebViewBuilder, WebViewDelegate,
 };
 use url::Url;
 

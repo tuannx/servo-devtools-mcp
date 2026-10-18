@@ -18,7 +18,7 @@ use anyhow::Context;
 use dpi::PhysicalSize;
 use image::ImageFormat;
 use servo::{
-    accesskit, ConsoleLogLevel, LoadStatus, Preferences, Servo, ServoBuilder,
+    accesskit, ConsoleLogLevel, LoadStatus, Preferences, RenderingContext, Servo, ServoBuilder,
     SoftwareRenderingContext, WebView, WebViewBuilder, WebViewDelegate,
 };
 use url::Url;

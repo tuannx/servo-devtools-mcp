@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use rmcp::{
     handler::server::wrapper::Parameters, model::*, schemars, tool, tool_handler,
-    tool_router, ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
+    tool_router, ErrorData as McpError, ServerHandler, ServiceExt,
 };
 use tokio::sync::Mutex;
 
