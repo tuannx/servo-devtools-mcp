@@ -16,6 +16,9 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+      - name: install system dependencies
+        # The pinned Servo engine links native libs (fontconfig at minimum).
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo check (all targets)
