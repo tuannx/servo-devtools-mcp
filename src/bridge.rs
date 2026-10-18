@@ -26,11 +26,11 @@ use dpi::PhysicalSize;
 use euclid::{Point2D, Vector2D};
 use image::ImageFormat;
 use servo::{
-    accesskit, CSSPixel, ConsoleLogLevel, InputEvent, JSValue, JavaScriptEvaluationError, Key,
-    KeyState, KeyboardEvent, LoadStatus, MouseButton, MouseButtonAction, MouseButtonEvent,
-    MouseMoveEvent, NamedKey, Preferences, RenderingContext, Scroll, Servo, ServoBuilder,
-    SoftwareRenderingContext, WebView, WebViewBuilder, WebViewDelegate, WebViewPoint,
-    WebViewVector,
+    accesskit, CSSPixel, ConsoleLogLevel, CookieSource, InputEvent, JSValue,
+    JavaScriptEvaluationError, Key, KeyState, KeyboardEvent, LoadStatus, MouseButton,
+    MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey, Preferences, RenderingContext,
+    Scroll, Servo, ServoBuilder, SoftwareRenderingContext, WebResourceLoad, WebView,
+    WebViewBuilder, WebViewDelegate, WebViewPoint, WebViewVector,
 };
 use url::Url;
 
@@ -52,6 +52,11 @@ const PAINT_INTERVAL: Duration = Duration::from_millis(100);
 struct McpWebViewDelegate {
     tree_updates: RefCell<Vec<accesskit::TreeUpdate>>,
     console: RefCell<Vec<(String, String)>>,
+    /// Request log. Servo only exposes the *request* side to the embedder
+    /// (`WebResourceLoad::request()`); response status/headers live behind the
+    /// crate-private responder, so `network_requests` is a request log, not a
+    /// full CDP-style Network log. No upstream patch needed.
+    network: RefCell<Vec<String>>,
 }
 
 impl WebViewDelegate for McpWebViewDelegate {
@@ -63,6 +68,18 @@ impl WebViewDelegate for McpWebViewDelegate {
         self.console
             .borrow_mut()
             .push((format!("{level:?}"), message));
+    }
+
+    fn load_web_resource(&self, _webview: WebView, load: WebResourceLoad) {
+        let req = load.request();
+        let record = serde_json::json!({
+            "url": req.url.to_string(),
+            "method": req.method.to_string(),
+            "destination": format!("{:?}", req.destination),
+            "is_main_frame": req.is_for_main_frame,
+            "is_redirect": req.is_redirect,
+        });
+        self.network.borrow_mut().push(record.to_string());
     }
 }
 
@@ -122,6 +139,17 @@ enum BridgeCommand {
     ResizeViewport {
         width: u32,
         height: u32,
+        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
+    NetworkRequests {
+        clear: bool,
+        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
+    Cookies {
+        action: String,
+        url: Option<String>,
+        name: Option<String>,
+        value: Option<String>,
         reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     },
 }
@@ -499,6 +527,78 @@ impl ServoEngine {
                 })();
                 let _ = reply.send(result);
             }
+            BridgeCommand::NetworkRequests { clear, reply } => {
+                let result = (|| -> Result<String, String> {
+                    // Pump briefly so in-flight requests land in the log.
+                    self.pump_until(|| false, Duration::from_millis(300));
+                    let mut log = self.delegate.network.borrow_mut();
+                    let entries: Vec<String> = if clear {
+                        log.drain(..).collect()
+                    } else {
+                        log.clone()
+                    };
+                    let parsed: Vec<serde_json::Value> = entries
+                        .iter()
+                        .map(|e| serde_json::from_str(e).unwrap_or(serde_json::Value::Null))
+                        .collect();
+                    serde_json::to_string(&serde_json::json!({
+                        "requests": parsed,
+                        "count": parsed.len(),
+                        "note": "request log only — Servo does not expose response status/headers to the embedder without an upstream patch",
+                    }))
+                    .map_err(|e| format!("network log serialize: {e}"))
+                })();
+                let _ = reply.send(result);
+            }
+            BridgeCommand::Cookies {
+                action,
+                url,
+                name,
+                value,
+                reply,
+            } => {
+                let result = (|| -> Result<String, String> {
+                    let page_url = match url {
+                        Some(u) => u,
+                        None => self
+                            .require_webview()?
+                            .url()
+                            .map(|u| u.to_string())
+                            .unwrap_or_default(),
+                    };
+                    let parsed =
+                        Url::parse(&page_url).map_err(|e| format!("bad url for cookies: {e}"))?;
+                    let manager = self.servo.site_data_manager();
+                    match action.as_str() {
+                        "get" => {
+                            let cookies = manager.cookies_for_url(parsed, CookieSource::HTTP);
+                            serde_json::to_string(
+                                &cookies
+                                    .iter()
+                                    .map(|c| {
+                                        serde_json::json!({
+                                            "name": c.name(),
+                                            "value": c.value(),
+                                            "domain": c.domain(),
+                                            "path": c.path(),
+                                        })
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                            .map_err(|e| format!("cookies serialize: {e}"))
+                        }
+                        "set" => {
+                            let name = name.ok_or("set requires a cookie name")?;
+                            let value = value.unwrap_or_default();
+                            let cookie = cookie::Cookie::new(name.clone(), value).into_owned();
+                            manager.set_cookie_for_url(parsed, cookie, None);
+                            Ok(format!("set cookie {name}"))
+                        }
+                        other => Err(format!("unknown cookies action '{other}'; use get or set")),
+                    }
+                })();
+                let _ = reply.send(result);
+            }
         }
     }
 
@@ -684,6 +784,34 @@ impl ServoBridge {
         self.call(|reply| BridgeCommand::ResizeViewport {
             width,
             height,
+            reply,
+        })
+        .await
+    }
+
+    /// Return the recorded network request log as JSON.
+    /// Request-only: Servo does not expose response status/headers to the
+    /// embedder without an upstream patch.
+    pub async fn network_requests(&self, clear: bool) -> Result<String, String> {
+        self.call(|reply| BridgeCommand::NetworkRequests { clear, reply })
+            .await
+    }
+
+    /// Cookie store access via Servo's public SiteDataManager API.
+    /// action "get" lists cookies for `url` (defaults to the current page URL);
+    /// action "set" stores `name`=`value` for `url`.
+    pub async fn cookies(
+        &self,
+        action: String,
+        url: Option<String>,
+        name: Option<String>,
+        value: Option<String>,
+    ) -> Result<String, String> {
+        self.call(|reply| BridgeCommand::Cookies {
+            action,
+            url,
+            name,
+            value,
             reply,
         })
         .await

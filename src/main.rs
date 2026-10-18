@@ -68,6 +68,24 @@ struct ResizeViewportParams {
     height: u32,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct NetworkRequestsParams {
+    /// When true, clear the log after reading. Default false (peek).
+    clear: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct CookiesParams {
+    /// "get" to list cookies, "set" to store one.
+    action: String,
+    /// URL whose cookies to read/write. Defaults to the current page URL.
+    url: Option<String>,
+    /// Cookie name (required for "set").
+    name: Option<String>,
+    /// Cookie value (for "set").
+    value: Option<String>,
+}
+
 #[derive(Clone)]
 struct ServoDevtools {
     bridge: Arc<Mutex<Option<ServoBridge>>>,
@@ -307,6 +325,39 @@ impl ServoDevtools {
             .await
         {
             Ok(msg) => Self::ok_text(msg),
+            Err(e) => Err(Self::err_text(e)),
+        }
+    }
+
+    #[tool(
+        name = "network_requests",
+        description = "Return the network request log recorded by the Servo engine: {url, method, destination, is_main_frame, is_redirect} per request. Request-only: Servo's public embedder API does not expose response status/headers, so there are no response codes here."
+    )]
+    async fn network_requests(
+        &self,
+        params: Parameters<NetworkRequestsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.engine().await?;
+        match engine
+            .network_requests(params.0.clear.unwrap_or(false))
+            .await
+        {
+            Ok(json) => Self::ok_text(json),
+            Err(e) => Err(Self::err_text(e)),
+        }
+    }
+
+    #[tool(
+        name = "cookies",
+        description = "Cookie store access via Servo's public SiteDataManager API. action \"get\" lists cookies for the URL (defaults to the current page) as [{name, value, domain, path}]. action \"set\" stores name=value for the URL."
+    )]
+    async fn cookies(&self, params: Parameters<CookiesParams>) -> Result<CallToolResult, McpError> {
+        let engine = self.engine().await?;
+        match engine
+            .cookies(params.0.action, params.0.url, params.0.name, params.0.value)
+            .await
+        {
+            Ok(json) => Self::ok_text(json),
             Err(e) => Err(Self::err_text(e)),
         }
     }
