@@ -16,16 +16,44 @@ not affiliated with it. It depends on Servo only as a library (git dependency,
 see "Pinned Servo revision" below). No code is copied from Servo; the crate's
 own files are MIT.
 
-## Status: P1 (MVP)
+## Status: P2 done (17 tools)
 
 | Milestone | State |
 |---|---|
 | P0 — prove a11y tree + JS eval + navigation from an independent crate | ✅ **PASS** (verified 2026-10-18, see evidence below) |
 | P1 — 15 tools MVP | ✅ **PASS** (verified 2026-10-18, see evidence below) |
-| P2 — debugging parity subset | planned |
-| P3 — crates.io publish + dev.to write-up | planned |
+| P2 — network + cookies via public API; performance_trace verdict | ✅ **DONE** (verified 2026-10-18, see evidence below) |
+| P3 — publish + write-up | 🟡 **PREPPED, not published** — `cargo publish --dry-run` proves crates.io publish is currently *impossible* (see "Publishing" below); dev.to draft is written but **not posted** (drafts-only) |
 
 Full plan: [`servo-devtools-mcp-plan-2026-10-17.md`](../) (in the author's notes repo).
+
+### P2 — evidence (2026-10-18, this VM)
+
+End-to-end MCP stdio smoke test (`/tmp/p2_smoke.py`), 12/12 checks green:
+
+- **`network_requests` — implemented with public API only.** The delegate
+  implements `WebViewDelegate::load_web_resource()` (public, default no-op),
+  which Servo calls for every resource load. Each record:
+  `{url, method, destination, is_main_frame, is_redirect}`. Verified: navigating
+  `https://example.com` logs 4 requests, main-frame flag correct on the document
+  request. **Honest limitation:** request log only — response status/headers
+  live behind the crate-private `WebResourceLoad` responder, so exposing them
+  would need an upstream patch, which is out of scope (project policy: no
+  contributions to servo/servo).
+- **`cookies` — implemented with public API only.** `get` lists cookies via
+  `Servo::site_data_manager().cookies_for_url(url, CookieSource::HTTP)`
+  (public method, verified at the pinned rev); `set` via
+  `set_cookie_for_url(url, Cookie, None)`. Verified round-trips:
+  JS-set cookie readable by the tool, tool-set cookie visible to
+  `document.cookie`.
+- **`performance_trace` — NOT SUPPORTED, verified.** There is no
+  tracing/profiling/performance API on any public embedder type: nothing on
+  `WebView`, `WebViewDelegate`, or `Servo` at the pinned rev (grep over
+  `components/servo/{webview,webview_delegate,servo}.rs`). The only related
+  surface is internal logging (`servo_tracing` re-export, `DiagnosticsLogging`
+  opts) — no trace-capture API. Would need an upstream patch: out of scope.
+
+### P1 — evidence (2026-10-18, this VM)
 
 ### P1 — evidence (2026-10-18, this VM)
 
@@ -73,7 +101,7 @@ End-to-end MCP stdio smoke test (`/tmp/p1_smoke.py`), 21/21 checks green:
   delta with no smooth-scroll animation; `a11y_snapshot` drains the update
   buffer each call (by design — next call sees fresh updates).
 
-## MCP tools (P1 — 15 tools)
+## MCP tools (P2 — 17 tools)
 
 | Tool | Description |
 |---|---|
@@ -91,6 +119,24 @@ End-to-end MCP stdio smoke test (`/tmp/p1_smoke.py`), 21/21 checks green:
 | `evaluate_js` | Evaluate JavaScript, return the result as JSON |
 | `console_messages` | Console messages logged by page content so far, as JSON |
 | `resize_viewport` | Resize the viewport to width × height pixels |
+| `network_requests` | Request log `{url, method, destination, is_main_frame, is_redirect}`; optional `clear`. Request-only — no response status/headers (Servo limitation, see P2 evidence) |
+| `cookies` | `get` lists cookies for a URL as `{name, value, domain, path}`; `set` stores `name=value` |
+
+### Parity vs chrome-devtools-mcp (honest)
+
+`chrome-devtools-mcp` (Google, ~34 tools over CDP) is the reference. Mapping:
+
+| chrome-devtools-mcp area | servo-devtools-mcp | Notes |
+|---|---|---|
+| Navigation (navigate, reload, back/forward) | ✅ `navigate`, `reload`, `go_back`, `go_forward`, `get_state` | |
+| Input (click, type, keys, scroll) | ✅ `click`, `type_text`, `key_press`, `scroll` | per-char typing, no IME |
+| Observation (screenshot, a11y/DOM snapshot) | ✅ `screenshot`, `a11y_snapshot`, `dom_snapshot` | a11y via AccessKit (Servo-native) |
+| JS evaluation | ✅ `evaluate_js` | |
+| Console | ✅ `console_messages` | via public delegate callback |
+| Cookies | ✅ `cookies` get/set | via public `SiteDataManager` API |
+| Network requests | ⚠️ `network_requests` (request log only) | response status/headers need an upstream patch |
+| Performance/tracing | ❌ not supported | no public API exists in Servo; CDP has none here either |
+| Viewport | ✅ `resize_viewport` | |
 
 ### Client config (Claude Code)
 
@@ -114,7 +160,61 @@ and the system libraries Servo needs (see [Servo's build docs](https://servo.org
 cargo build --release
 ```
 
-**Environment notes** (from the 2026-10-18 bring-up on a headless Linux VM):
+### Install on macOS
+
+Steps follow [Servo's own build docs](https://book.servo.org/building/building.html)
+(verified 2026-10-18); differences from Linux are called out.
+
+```sh
+# 1. Xcode Command Line Tools + Homebrew
+xcode-select --install
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# 2. Native build deps (from Servo's own Brewfile — cmake + pkg-config only)
+brew install cmake pkg-config
+
+# 3. Rust (needs >= 1.97 — this crate sets rust-version = "1.97")
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# restart your shell so cargo is on PATH
+
+# 4. Build (first build compiles the whole Servo engine: 1–3 h, ~15 GB disk)
+git clone https://github.com/tuannx/servo-devtools-mcp
+cd servo-devtools-mcp
+cargo build --release
+# binary: ./target/release/servo-devtools-mcp
+```
+
+macOS vs Linux notes:
+- **No fontconfig needed on macOS** — Servo's fonts component uses CoreText
+  there (verified in `components/fonts/Cargo.toml` at the pinned rev; fontconfig
+  is Linux/FreeBSD-only).
+- **No EGL/Mesa needed on macOS** — the `libegl1`/`libegl-mesa0` requirement
+  and `XDG_RUNTIME_DIR` are Linux-only (`SoftwareRenderingContext` uses the
+  platform GL on macOS).
+- Media (audio/video playback) would need GStreamer
+  (`etc/install_macos_gstreamer.sh` in the Servo tree); the MCP tools here
+  don't use media, so it's optional.
+- Apple Silicon: builds natively on aarch64; no Rosetta needed.
+
+> Not build-verified on Mac hardware from this Linux dev environment — the
+> steps above are Servo's official macOS build prerequisites plus this crate's
+> own `cargo build --release`. If a step fails on your Mac, file an issue.
+
+Claude Code client config (macOS paths):
+
+```json
+{
+  "mcpServers": {
+    "servo-devtools": {
+      "command": "/Users/you/servo-devtools-mcp/target/release/servo-devtools-mcp"
+    }
+  }
+}
+```
+
+### Environment notes (Linux)
+
+From the 2026-10-18 bring-up on a headless Linux VM:
 - `SoftwareRenderingContext` needs `libEGL` (Mesa): `apt install libegl1 libegl-mesa0`,
   plus a valid `XDG_RUNTIME_DIR`.
 - Sandboxed networks need the egress proxy in `Preferences`
@@ -134,6 +234,37 @@ rev = 23564ef62e2d898dee75d161bf62cb4d5cb89daf   # servo/servo main, 2026-10-18
 Files verified at that commit: `components/servo/lib.rs`, `webview.rs`,
 `webview_delegate.rs`, `servo.rs`, `components/servo/tests/{accessibility.rs,
 common/mod.rs}`. When bumping the pin, re-check them — Servo's WebView API churns.
+
+### Publishing
+
+**crates.io: currently impossible by design.** `cargo publish --dry-run`
+(2026-10-18) fails with:
+
+```
+error: failed to verify manifest ...
+  all dependencies must have a version requirement specified when publishing.
+  dependency `servo` does not specify a version
+```
+
+crates.io forbids git dependencies, and the `servo` crate is not published on
+crates.io — so this crate can never be published there while it depends on
+Servo by git rev. This is a structural property, not a metadata bug. If Servo
+ever publishes the `servo` crate, flip the dependency to a version requirement
+and re-run the dry-run.
+
+Distribution until then: **GitHub releases + `cargo install --git`**:
+
+```sh
+cargo install --git https://github.com/tuannx/servo-devtools-mcp
+```
+
+Publish checklist (for the owner, when the blocker lifts):
+1. `cargo login` with the owner's crates.io API token (owner-only step).
+2. Bump `version` in `Cargo.toml`.
+3. `cargo publish --dry-run` — must pass.
+4. Tag `git tag vX.Y.Z && git push --tags`; cut a GitHub release with the
+   release binary attached.
+5. Post the dev.to write-up (`docs/devto-draft.md` — draft only, not posted).
 
 ## Architecture
 

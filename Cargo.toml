@@ -6,6 +6,8 @@ description = "MCP server exposing Servo browser-engine control to AI agents —
 license = "MIT"
 repository = "https://github.com/tuannx/servo-devtools-mcp"
 rust-version = "1.97"
+keywords = ["mcp", "servo", "browser", "devtools", "automation"]
+categories = ["development-tools"]
 
 # ---------------------------------------------------------------------------
 # Pinned Servo revision
