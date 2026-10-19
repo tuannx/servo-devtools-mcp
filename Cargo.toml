@@ -49,6 +49,17 @@ euclid = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
 base64 = "0.22"
 anyhow = "1"
+# Independent HTTP client for the http_fetch tool (response status/headers for
+# arbitrary URLs). rustls-based: no system OpenSSL needed. Deliberately NOT
+# wired into the Servo engine — it answers "what does this URL return", not
+# "what did the engine load".
+#
+# Crypto-provider alignment: Servo's tree enables `aws-lc-rs` on rustls 0.23
+# and nothing else. reqwest's stock rustls features would ALSO enable `ring`,
+# and rustls panics at runtime when both providers are compiled in. So we use
+# the no-provider variant and enable only aws-lc-rs (same as Servo).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12", "aws-lc-rs"] }
 log = "0.4"
 env_logger = "0.11"
 # Same cookie crate Servo itself uses (workspace dep = cookie 0.18).

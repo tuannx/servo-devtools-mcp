@@ -16,16 +16,61 @@ not affiliated with it. It depends on Servo only as a library (git dependency,
 see "Pinned Servo revision" below). No code is copied from Servo; the crate's
 own files are MIT.
 
-## Status: P2 done (17 tools)
+## Status: final — 18 tools, all gaps closed
 
 | Milestone | State |
 |---|---|
 | P0 — prove a11y tree + JS eval + navigation from an independent crate | ✅ **PASS** (verified 2026-10-18, see evidence below) |
 | P1 — 15 tools MVP | ✅ **PASS** (verified 2026-10-18, see evidence below) |
 | P2 — network + cookies via public API; performance_trace verdict | ✅ **DONE** (verified 2026-10-18, see evidence below) |
+| Final sweep — close every remaining tool gap | ✅ **DONE** (verified 2026-10-19, see evidence below) |
 | P3 — publish + write-up | 🟡 **PREPPED, not published** — `cargo publish --dry-run` proves crates.io publish is currently *impossible* (see "Publishing" below); dev.to draft is written but **not posted** (drafts-only) |
 
 Full plan: [`servo-devtools-mcp-plan-2026-10-17.md`](../) (in the author's notes repo).
+
+### Final sweep — evidence (2026-10-19, this VM)
+
+No tool left open: every gap from P2 got a final verdict — implemented with a
+test, or formally closed with evidence.
+
+- **Response status/headers — deep dive, final verdict: not exposed by the
+  engine, worked around honestly.**
+  - (a) `WebViewDelegate` (pinned rev, `components/servo/webview_delegate.rs`):
+    the trait's only network-related callback is `load_web_resource`
+    (request side, `WebResourceRequest`); the response flows through
+    `crate::responders` (`responder: AutomaticResponder<WebResourceResponseMsg>`,
+    line 242) — crate-private. No public response callback exists.
+  - (b) `Servo` public API (`components/servo/servo.rs`): `network_manager()`
+    exposes only `cache_entries()` / `clear_cache()` / `set_online_state()`
+    (`network_manager.rs` lines 61–90) — cache metadata, no response
+    observation. No upstream patch is allowed by project policy, so (a)/(b)
+    are closed.
+  - (c) **Implemented `http_fetch` instead**: an independent reqwest-based
+    tool returning `{status, headers, final_url, body}` for any http/https URL
+    (method/headers/body-cap/timeout params). It is explicitly documented as
+    NOT the engine's traffic — a separate request by the tool — and complements
+    `network_requests` (the engine's request log). No passing-off.
+  - Build lessons recorded: reqwest must NOT enable `ring` (Servo's tree
+    enables `aws-lc-rs` on rustls 0.23; both providers compiled in makes rustls
+    panic at runtime), so the crate uses `rustls-tls-native-roots-no-provider`
+    + an explicit `rustls` dep with `aws-lc-rs`, and installs
+    `aws_lc_rs::default_provider()` as the process default (reqwest's
+    no-provider build panics in `ClientBuilder::build()` otherwise).
+- **`performance_trace` — formally closed: NOT SUPPORTED.** Double-checked
+  2026-10-19: zero trace/profile/perf public functions on `WebView`,
+  `WebViewDelegate`, or `Servo` at the pinned rev
+  (`components/servo/{webview,webview_delegate,servo}.rs`); the re-exported
+  `servo_tracing` (`components/servo_tracing/lib.rs`) is only proc-macro
+  instrumentation (`instrument`, `skip`, `instrument_all`) for internal use —
+  no runtime trace-capture API. Needs an upstream patch: out of scope.
+- **Full sweep: 31/31 smoke checks green** (MCP stdio, this VM): `tools/list`
+  returns exactly the 18 tools; every tool has a passing live test, including
+  the form-interaction loop (click input → type "Tony" → click button →
+  `onclick` ran, `"clicked:Tony"`), https navigation through the egress proxy,
+  cookie round-trips, network request log with `clear`, console capture, PNG
+  screenshot, and `http_fetch` (200 + headers on example.com, 404 on
+  httpbin, clean errors on bad scheme/action/key).
+- `cargo check --all-targets --locked` + `cargo fmt --check`: PASS.
 
 ### P2 — evidence (2026-10-18, this VM)
 
@@ -96,12 +141,18 @@ End-to-end MCP stdio smoke test (`/tmp/p1_smoke.py`), 21/21 checks green:
 ### Known issues
 
 - None currently blocking. Screenshot and console capture — the two P0
-  unknowns — are both resolved (see P1 evidence). Remaining P1 caveats:
+  unknowns — are both resolved (see P1 evidence). Remaining caveats:
   `type_text` sends per-character key events (no IME); `scroll` is a raw wheel
   delta with no smooth-scroll animation; `a11y_snapshot` drains the update
-  buffer each call (by design — next call sees fresh updates).
+  buffer each call (by design — next call sees fresh updates);
+  `network_requests` is request-only by Servo's public-API design;
+  `http_fetch` is an independent fetch (reqwest), not the engine's traffic;
+  `performance_trace` is unsupported (see final-sweep evidence).
+- Build note (rustls): the crate pins the `aws-lc-rs` crypto provider to match
+  Servo's tree — do not enable `ring` on the reqwest/rustls dependency or
+  rustls panics at runtime (both providers compiled in).
 
-## MCP tools (P2 — 17 tools)
+## MCP tools (final — 18 tools)
 
 | Tool | Description |
 |---|---|
@@ -119,8 +170,9 @@ End-to-end MCP stdio smoke test (`/tmp/p1_smoke.py`), 21/21 checks green:
 | `evaluate_js` | Evaluate JavaScript, return the result as JSON |
 | `console_messages` | Console messages logged by page content so far, as JSON |
 | `resize_viewport` | Resize the viewport to width × height pixels |
-| `network_requests` | Request log `{url, method, destination, is_main_frame, is_redirect}`; optional `clear`. Request-only — no response status/headers (Servo limitation, see P2 evidence) |
+| `network_requests` | Request log `{url, method, destination, is_main_frame, is_redirect}`; optional `clear`. Request-only — no response status/headers (Servo limitation, see final-sweep evidence) |
 | `cookies` | `get` lists cookies for a URL as `{name, value, domain, path}`; `set` stores `name=value` |
+| `http_fetch` | Independent HTTP fetch: `{status, headers, final_url, body}` for a URL (method/headers/body-cap/timeout params). NOT the engine's traffic — complements `network_requests` |
 
 ### Parity vs chrome-devtools-mcp (honest)
 
@@ -134,8 +186,8 @@ End-to-end MCP stdio smoke test (`/tmp/p1_smoke.py`), 21/21 checks green:
 | JS evaluation | ✅ `evaluate_js` | |
 | Console | ✅ `console_messages` | via public delegate callback |
 | Cookies | ✅ `cookies` get/set | via public `SiteDataManager` API |
-| Network requests | ⚠️ `network_requests` (request log only) | response status/headers need an upstream patch |
-| Performance/tracing | ❌ not supported | no public API exists in Servo; CDP has none here either |
+| Network requests | ⚠️ `network_requests` (request log only) + ✅ `http_fetch` (status/headers for any URL, independent fetch) | engine response status/headers need an upstream patch; `http_fetch` is the honest workaround, clearly labeled |
+| Performance/tracing | ❌ not supported (formal verdict) | no public API on `WebView`/`WebViewDelegate`/`Servo` at the pinned rev (`components/servo/{webview,webview_delegate,servo}.rs`); `servo_tracing` is internal proc-macro instrumentation only — needs an upstream patch, out of scope |
 | Viewport | ✅ `resize_viewport` | |
 
 ### Client config (Claude Code)

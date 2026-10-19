@@ -86,6 +86,20 @@ struct CookiesParams {
     value: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct HttpFetchParams {
+    /// URL to fetch (http/https).
+    url: String,
+    /// HTTP method: GET, HEAD, POST... Default GET.
+    method: Option<String>,
+    /// Optional request headers, as "Name: value" strings.
+    headers: Option<Vec<String>>,
+    /// Max response body bytes to return (truncated past this). Default 8192, cap 65536.
+    max_body_bytes: Option<usize>,
+    /// Timeout in seconds. Default 20.
+    timeout_secs: Option<u64>,
+}
+
 #[derive(Clone)]
 struct ServoDevtools {
     bridge: Arc<Mutex<Option<ServoBridge>>>,
@@ -361,10 +375,115 @@ impl ServoDevtools {
             Err(e) => Err(Self::err_text(e)),
         }
     }
+
+    #[tool(
+        name = "http_fetch",
+        description = "Fetch a URL with an independent HTTP client and return {status, headers, final_url, body}. Use this when you need response status/headers for a URL. NOTE: this is NOT the Servo engine's traffic — it is a separate request made by this tool. For what the engine itself requested, use network_requests (request log only)."
+    )]
+    async fn http_fetch(
+        &self,
+        params: Parameters<HttpFetchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        match http_fetch_async(&p).await {
+            Ok(json) => Self::ok_text(json),
+            Err(e) => Err(Self::err_text(e)),
+        }
+    }
 }
 
 #[tool_handler]
 impl ServerHandler for ServoDevtools {}
+
+/// Independent HTTP fetch (async reqwest client). Runs inside the MCP async
+/// runtime, never touches the Servo engine: this answers "what does this URL
+/// return", not "what did the engine load". Honest complement to
+/// `network_requests` (engine request log) since Servo's public embedder API
+/// exposes no response status/headers without an upstream patch.
+async fn http_fetch_async(p: &HttpFetchParams) -> Result<String, String> {
+    let url = url::Url::parse(&p.url).map_err(|e| format!("bad url: {e}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("only http/https URLs are supported".to_string());
+    }
+    let method_name = p.method.as_deref().unwrap_or("GET").to_uppercase();
+    let method = reqwest::Method::from_bytes(method_name.as_bytes())
+        .map_err(|_| format!("unsupported method: {method_name}"))?;
+    let max_body = p.max_body_bytes.unwrap_or(8192).min(65536);
+    let timeout = std::time::Duration::from_secs(p.timeout_secs.unwrap_or(20).min(120));
+
+    let mut builder = reqwest::Client::builder().timeout(timeout);
+    // reqwest's no-provider build panics in ClientBuilder::build() unless a
+    // process-default CryptoProvider is installed. Use aws-lc-rs — the same
+    // provider Servo's tree enables on rustls 0.23 (see Cargo.toml).
+    let _ = rustls::crypto::CryptoProvider::install_default(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    );
+    // Honor sandbox egress proxies, same as the engine preferences do.
+    if let Ok(proxy) = std::env::var("https_proxy").or_else(|_| std::env::var("HTTPS_PROXY")) {
+        builder =
+            builder.proxy(reqwest::Proxy::https(&proxy).map_err(|e| format!("bad proxy: {e}"))?);
+    }
+    if let Ok(proxy) = std::env::var("http_proxy").or_else(|_| std::env::var("HTTP_PROXY")) {
+        builder =
+            builder.proxy(reqwest::Proxy::http(&proxy).map_err(|e| format!("bad proxy: {e}"))?);
+    }
+    let client = builder
+        .build()
+        .map_err(|e| format!("http client build failed: {e}"))?;
+
+    let mut req = client.request(method, url.as_str());
+    for h in p.headers.iter().flatten() {
+        let (name, value) = h
+            .split_once(':')
+            .ok_or_else(|| format!("bad header (need 'Name: value'): {h}"))?;
+        req = req.header(name.trim(), value.trim());
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status().as_u16();
+    let final_url = resp.url().to_string();
+    let headers: std::collections::BTreeMap<String, String> = resp
+        .headers()
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.to_string(),
+                v.to_str().unwrap_or("<non-utf8>").to_string(),
+            )
+        })
+        .collect();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("reading body failed: {e}"))?;
+    let truncated = bytes.len() > max_body;
+    let body_bytes = &bytes[..bytes.len().min(max_body)];
+    let (body, body_encoding) = match std::str::from_utf8(body_bytes) {
+        Ok(text) => (text.to_string(), "utf8-text"),
+        Err(_) => {
+            use base64::Engine as _;
+            (
+                base64::engine::general_purpose::STANDARD.encode(body_bytes),
+                "base64",
+            )
+        }
+    };
+
+    serde_json::to_string(&serde_json::json!({
+        "url": url.as_str(),
+        "final_url": final_url,
+        "status": status,
+        "headers": headers,
+        "body_truncated": truncated,
+        "body_encoding": body_encoding,
+        "body": body,
+        "note": "independent fetch by this tool (reqwest), NOT the Servo engine's traffic",
+    }))
+    .map_err(|e| format!("result serialize: {e}"))
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
