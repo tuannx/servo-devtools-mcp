@@ -411,10 +411,7 @@ impl ServoEngine {
                     // History traversal commits asynchronously; wait for the URL
                     // to actually change before waiting for load, otherwise the
                     // reported URL can be the pre-traversal one.
-                    if !self.pump_until(
-                        || webview.url() != before,
-                        Duration::from_secs(10),
-                    ) {
+                    if !self.pump_until(|| webview.url() != before, Duration::from_secs(10)) {
                         return Err("timed out waiting for history traversal".into());
                     }
                     self.wait_for_load(webview, TOOL_TIMEOUT)?;
@@ -429,10 +426,7 @@ impl ServoEngine {
                     let before = webview.url();
                     webview.go_forward(1);
                     // Same async-commit race as go_back: wait for the URL change.
-                    if !self.pump_until(
-                        || webview.url() != before,
-                        Duration::from_secs(10),
-                    ) {
+                    if !self.pump_until(|| webview.url() != before, Duration::from_secs(10)) {
                         return Err("timed out waiting for history traversal".into());
                     }
                     self.wait_for_load(webview, TOOL_TIMEOUT)?;
